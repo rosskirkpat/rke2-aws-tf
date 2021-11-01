@@ -1,0 +1,9 @@
+#### Variable definitions
+vpc_name             = ""
+vpc_domain_name      = null #leave blank for aws default
+prefix               = "" #prefix for instance names
+owner                = "" #owner tag value
+aws_region           = "us-east-1"
+rancher_api_endpoint = "https://127.0.0.1:8080"
+rancher_cluster_name = "cluster-name"
+rancher_api_token    = "token-xxxx:<token>" # use login.ps1 to generate

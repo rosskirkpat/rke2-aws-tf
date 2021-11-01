@@ -1,204 +1,159 @@
-locals {
-  # Create a unique cluster name we'll prefix to all resources created and ensure it's lowercase
-  uname = var.unique_suffix ? lower("${var.cluster_name}-${random_string.uid.result}") : lower(var.cluster_name)
+# Configure the AWS Provider
+provider "aws" {
+  access_key = var.aws_access_key
+  secret_key = var.aws_secret_key
+  region     = var.aws_region
+}
 
-  default_tags = {
-    "ClusterType" = "rke2",
+resource "random_integer" "cluster_name_append" {
+  min = 1
+  max = 99999
+}
+
+resource "tls_private_key" "ssh_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "generated_key" {
+  key_name   = "terraform-key-pair-${random_integer.cluster_name_append.result}"
+  public_key = tls_private_key.ssh_key.public_key_openssh
+}
+
+resource "local_file" "pem_file" {
+  filename = "files\\${aws_key_pair.generated_key.key_name}.pem"
+  sensitive_content = tls_private_key.ssh_key.private_key_pem
+}
+
+# Load in the modules
+module "aws_vpc_create" {
+  source               = "./modules/aws_vpc"
+  vpc_name             = var.vpc_name
+  owner                = var.owner
+  rancher_cluster_name = "${var.rancher_cluster_name}${random_integer.cluster_name_append.result}"
+  vpc_domain_name      = var.vpc_domain_name
+}
+
+module "ami" {
+  source = "./modules/aws_ami"
+}
+
+module "rancherv2" {
+  source = "./modules/rancherv2"
+  # vpc_name             = var.vpc_name
+  owner                = var.owner
+  rancher_cluster_name = "${var.rancher_cluster_name}${random_integer.cluster_name_append.result}"
+  # vpc_domain_name      = var.vpc_domain_name
+  prefix               = var.prefix
+  subnet_id            = module.aws_vpc_create.subnet_ids[0]
+  default_sg           = [module.aws_vpc_create.default_security_group_id]
+  vpc_id               = module.aws_vpc_create.vpc_id
+  # access_key = var.aws_access_key
+  # secret_key = var.aws_secret_key
+  # region     = var.aws_region
+}
+
+# Configure the Rancher2 provider
+provider "rancher2" {
+  api_url    = module.rancherv2.rancher2_url
+  token_key  = module.rancherv2.rancher2_token
+  # api_url    = var.rancher_api_endpoint
+  # token_key  = var.rancher_api_token
+  insecure   = true
+}
+# resource "rancher2_cluster_v2" "rke2_win_cluster" {
+#   name               = "${var.rancher_cluster_name}${random_integer.cluster_name_append.result}"
+#   fleet_namespace    = "fleet-default"
+#   kubernetes_version = "v1.21.5+rke2r2"
+#   }
+
+resource "aws_instance" "linux_master" {
+  count = var.instances.linux_master.count
+  tags = {
+    Name        = "${var.prefix}-master-${count.index}"
+    Owner       = var.owner
+    DoNotDelete = "true"
   }
 
-  ccm_tags = {
-    "kubernetes.io/cluster/${local.uname}" = "owned"
+  key_name                    = aws_key_pair.generated_key.key_name
+  ami                         = module.ami.leap-15_SP3
+  instance_type               = var.instances.linux_master.type
+  associate_public_ip_address = "true"
+  subnet_id                   = module.aws_vpc_create.subnet_ids[0]
+  vpc_security_group_ids      = [module.aws_vpc_create.default_security_group_id]
+  source_dest_check           = "false"
+  # user_data                   = base64encode(templatefile("files/user-data-linux.yml", { cluster_registration = format("%s%s","${rancher2_cluster_v2.rke2_win_cluster.cluster_registration_token[0].insecure_node_command}"," --etcd --controlplane") }))
+  user_data                   = base64encode(templatefile("files/user-data-linux.yml", { cluster_registration = format("%s%s",module.rancherv2.insecure_rke2_cluster_command," --etcd --controlplane") }))
+
+
+
+  root_block_device {
+    volume_size = var.instances.linux_master.volume_size
   }
 
-  cluster_data = {
-    name       = local.uname
-    server_url = module.cp_lb.dns
-    cluster_sg = aws_security_group.cluster.id
-    token      = module.statestore.token
+  credit_specification {
+    cpu_credits = "standard"
   }
 }
 
-resource "random_string" "uid" {
-  # NOTE: Don't get too crazy here, several aws resources have tight limits on lengths (such as load balancers), in practice we are also relying on users to uniquely identify their cluster names
-  length  = 3
-  special = false
-  lower   = true
-  upper   = false
-  number  = true
+resource "aws_instance" "linux_worker" {
+
+  count = var.instances.linux_worker.count
+  tags = {
+    Name        = "${var.prefix}-worker-${count.index}"
+    Owner       = var.owner
+    DoNotDelete = "true"
+  }
+
+  key_name                    = aws_key_pair.generated_key.key_name
+  ami                         = module.ami.leap-15_SP3
+  instance_type		            = var.instances.linux_worker.type
+  associate_public_ip_address = "true"
+  subnet_id                   = module.aws_vpc_create.subnet_ids[0]
+  vpc_security_group_ids      = [module.aws_vpc_create.default_security_group_id]
+  source_dest_check           = "false"
+  # user_data                   = base64encode(templatefile("files/user-data-linux.yml", { cluster_registration = format("%s%s","${rancher2_cluster_v2.rke2_win_cluster.cluster_registration_token[0].insecure_node_command}"," --worker") }))
+  user_data                   = base64encode(templatefile("files/user-data-linux.yml", { cluster_registration = format("%s%s",module.rancherv2.insecure_rke2_cluster_command," --worker") }))
+
+
+  root_block_device {
+    volume_size = var.instances.linux_worker.volume_size
+  }
+
+  credit_specification {
+    cpu_credits = "standard"
+  }
 }
 
-#
-# Cluster join token
-#
-resource "random_password" "token" {
-  length  = 40
-  special = false
+resource "aws_instance" "windows_worker" {
+  count = var.instances.windows_worker.count
+  tags = {
+    Name        = "${var.prefix}-win-${count.index}"
+    Owner       = var.owner
+    DoNotDelete = "true"
+  }
+
+  key_name                    = aws_key_pair.generated_key.key_name
+  ami                         = module.ami.windows-2019
+  instance_type		            = var.instances.windows_worker.type
+  associate_public_ip_address = "true"
+  subnet_id                   = module.aws_vpc_create.subnet_ids[0]
+  vpc_security_group_ids      = [module.aws_vpc_create.default_security_group_id]
+  get_password_data           = "true"
+  source_dest_check           = "false"
+  # user_data                   = base64encode(templatefile("files/user-data-windows.yml", { cluster_registration = format("%s","${rancher2_cluster_v2.rke2_win_cluster.cluster_registration_token[0].insecure_windows_node_command}") }))
+  user_data                   =  base64encode(templatefile("files/user-data-windows.yml", { cluster_registration = format("%s",module.rancherv2.insecure_rke2_cluster_windows_command)}))
+
+  root_block_device {
+    volume_size = var.instances.windows_worker.volume_size
+  }
+
+  credit_specification {
+    cpu_credits = "standard"
+  }
 }
 
-module "statestore" {
-  source = "./modules/statestore"
-  name   = local.uname
-  token  = random_password.token.result
-  tags   = merge(local.default_tags, var.tags)
-}
-
-#
-# Controlplane Load Balancer
-#
-module "cp_lb" {
-  source  = "./modules/elb"
-  name    = local.uname
-  vpc_id  = var.vpc_id
-  subnets = var.subnets
-
-  enable_cross_zone_load_balancing = var.controlplane_enable_cross_zone_load_balancing
-  internal                         = var.controlplane_internal
-
-  cp_ingress_cidr_blocks            = var.controlplane_allowed_cidrs
-  cp_supervisor_ingress_cidr_blocks = var.controlplane_allowed_cidrs
-
-  tags = merge({}, local.default_tags, local.default_tags, var.tags)
-}
-
-#
-# Security Groups
-#
-
-# Shared Cluster Security Group
-resource "aws_security_group" "cluster" {
-  name        = "${local.uname}-rke2-cluster"
-  description = "Shared ${local.uname} cluster security group"
-  vpc_id      = var.vpc_id
-
-  tags = merge({
-    "shared" = "true",
-  }, local.default_tags, var.tags)
-}
-
-resource "aws_security_group_rule" "cluster_shared" {
-  description       = "Allow all inbound traffic between ${local.uname} cluster nodes"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
-  security_group_id = aws_security_group.cluster.id
-  type              = "ingress"
-
-  self = true
-}
-
-resource "aws_security_group_rule" "cluster_egress" {
-  description       = "Allow all outbound traffic"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
-  security_group_id = aws_security_group.cluster.id
-  type              = "egress"
-  cidr_blocks       = ["0.0.0.0/0"]
-}
-
-# Server Security Group
-resource "aws_security_group" "server" {
-  name        = "${local.uname}-rke2-server"
-  vpc_id      = var.vpc_id
-  description = "${local.uname} rke2 server node pool"
-  tags        = merge(local.default_tags, var.tags)
-}
-
-resource "aws_security_group_rule" "server_cp" {
-  from_port                = 6443
-  to_port                  = 6443
-  protocol                 = "tcp"
-  security_group_id        = aws_security_group.server.id
-  type                     = "ingress"
-  source_security_group_id = module.cp_lb.security_group
-}
-
-resource "aws_security_group_rule" "server_cp_supervisor" {
-  from_port                = 9345
-  to_port                  = 9345
-  protocol                 = "tcp"
-  security_group_id        = aws_security_group.server.id
-  type                     = "ingress"
-  source_security_group_id = module.cp_lb.security_group
-}
-
-#
-# IAM Role
-#
-module "iam" {
-  count = var.iam_instance_profile == "" ? 1 : 0
-
-  source = "./modules/policies"
-  name   = "${local.uname}-rke2-server"
-
-  permissions_boundary = var.iam_permissions_boundary
-
-  tags = merge({}, local.default_tags, var.tags)
-}
-
-#
-# Policies
-#
-resource "aws_iam_role_policy" "aws_required" {
-  count = var.iam_instance_profile == "" ? 1 : 0
-
-  name   = "${local.uname}-rke2-server-aws-introspect"
-  role   = module.iam[count.index].role
-  policy = data.aws_iam_policy_document.aws_required[count.index].json
-}
-
-resource "aws_iam_role_policy" "aws_ccm" {
-  count = var.iam_instance_profile == "" && var.enable_ccm ? 1 : 0
-
-  name   = "${local.uname}-rke2-server-aws-ccm"
-  role   = module.iam[count.index].role
-  policy = data.aws_iam_policy_document.aws_ccm[count.index].json
-}
-
-resource "aws_iam_role_policy" "get_token" {
-  count = var.iam_instance_profile == "" ? 1 : 0
-
-  name   = "${local.uname}-rke2-server-get-token"
-  role   = module.iam[count.index].role
-  policy = module.statestore.token.policy_document
-}
-
-resource "aws_iam_role_policy" "put_kubeconfig" {
-  count = var.iam_instance_profile == "" ? 1 : 0
-
-  name   = "${local.uname}-rke2-server-put-kubeconfig"
-  role   = module.iam[count.index].role
-  policy = module.statestore.kubeconfig_put_policy
-}
-
-#
-# Server Nodepool
-#
-module "servers" {
-  source = "./modules/nodepool"
-  name   = "${local.uname}-server"
-
-  vpc_id                      = var.vpc_id
-  subnets                     = var.subnets
-  ami                         = var.ami
-  instance_type               = var.instance_type
-  block_device_mappings       = var.block_device_mappings
-  extra_block_device_mappings = var.extra_block_device_mappings
-  vpc_security_group_ids      = concat([aws_security_group.server.id, aws_security_group.cluster.id], var.extra_security_group_ids)
-  spot                        = var.spot
-  load_balancers              = [module.cp_lb.name]
-
-  # Overrideable variables
-  userdata             = data.template_cloudinit_config.this.rendered
-  iam_instance_profile = var.iam_instance_profile == "" ? module.iam[0].iam_instance_profile : var.iam_instance_profile
-
-  # Don't allow something not recommended within etcd scaling, set max deliberately and only control desired
-  asg = { min : 1, max : 7, desired : var.servers }
-
-  # TODO: Ideally set this to `length(var.servers)`, but currently blocked by: https://github.com/rancher/rke2/issues/349
-  min_elb_capacity = 1
-
-  tags = merge({
-    "Role" = "server",
-  }, local.ccm_tags, var.tags)
+data "template_file" "decrypted_keys" {
+  count = length(aws_instance.windows_worker)
+  template = rsadecrypt(element(aws_instance.windows_worker.*.password_data, count.index), tls_private_key.ssh_key.private_key_pem)
 }
