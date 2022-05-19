@@ -21,3 +21,6 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL    
     groups: users, admin
     lock_passwd: false
+
+run-cmd:
+  - ${cluster_registration}

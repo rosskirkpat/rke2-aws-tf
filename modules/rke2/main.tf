@@ -1,9 +1,11 @@
 locals {
   # Create a unique cluster name we'll prefix to all resources created and ensure it's lowercase
-  uname = var.unique_suffix ? lower("${var.cluster_name}-${random_string.uid.result}") : lower(var.cluster_name)
+  uname = var.unique_suffix ? lower("${var.rancher_cluster_name}-${random_string.uid.result}") : lower(var.rancher_cluster_name)
 
   default_tags = {
     "ClusterType" = "rke2",
+    "Owner"       = var.owner,
+    "DoNotDelete" = "true",
   }
 
   ccm_tags = {
@@ -16,6 +18,10 @@ locals {
     cluster_sg = aws_security_group.cluster.id
     token      = module.statestore.token
   }
+}
+
+data "http" "myipv4" {
+  url = "http://whatismyip.akamai.com/"
 }
 
 resource "random_string" "uid" {
@@ -36,7 +42,7 @@ resource "random_password" "token" {
 }
 
 module "statestore" {
-  source = "./modules/statestore"
+  source = "../statestore"
   name   = local.uname
   token  = random_password.token.result
   tags   = merge(local.default_tags, var.tags)
@@ -46,7 +52,7 @@ module "statestore" {
 # Controlplane Load Balancer
 #
 module "cp_lb" {
-  source  = "./modules/elb"
+  source  = "../elb"
   name    = local.uname
   vpc_id  = var.vpc_id
   subnets = var.subnets
@@ -97,6 +103,24 @@ resource "aws_security_group_rule" "cluster_egress" {
   cidr_blocks       = ["0.0.0.0/0"]
 }
 
+resource "aws_security_group_rule" "cluster_ingress_rdp" {
+  from_port                = 3389
+  to_port                  = 3389
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.cluster.id
+  type                     = "ingress"
+  cidr_blocks              = ["${chomp(data.http.myipv4.body)}/32"]
+}
+
+resource "aws_security_group_rule" "cluster_ingress_ssh" {
+  from_port                = 22
+  to_port                  = 22
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.cluster.id
+  type                     = "ingress"
+  cidr_blocks              = ["${chomp(data.http.myipv4.body)}/32"]
+}
+
 # Server Security Group
 resource "aws_security_group" "server" {
   name        = "${local.uname}-rke2-server"
@@ -129,7 +153,7 @@ resource "aws_security_group_rule" "server_cp_supervisor" {
 module "iam" {
   count = var.iam_instance_profile == "" ? 1 : 0
 
-  source = "./modules/policies"
+  source = "../policies"
   name   = "${local.uname}-rke2-server"
 
   permissions_boundary = var.iam_permissions_boundary
@@ -176,7 +200,7 @@ resource "aws_iam_role_policy" "put_kubeconfig" {
 # Server Nodepool
 #
 module "servers" {
-  source = "./modules/nodepool"
+  source = "../nodepool"
   name   = "${local.uname}-server"
 
   vpc_id                      = var.vpc_id
@@ -192,6 +216,7 @@ module "servers" {
   # Overrideable variables
   userdata             = data.template_cloudinit_config.this.rendered
   iam_instance_profile = var.iam_instance_profile == "" ? module.iam[0].iam_instance_profile : var.iam_instance_profile
+  associate_public_ip_address = true
 
   # Don't allow something not recommended within etcd scaling, set max deliberately and only control desired
   asg = { min : 1, max : 7, desired : var.servers }

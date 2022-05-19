@@ -29,6 +29,10 @@ resource "aws_launch_template" "this" {
     }
   }
 
+  network_interfaces {
+    associate_public_ip_address = var.associate_public_ip_address
+  }
+
   dynamic "block_device_mappings" {
     for_each = var.extra_block_device_mappings
     content {

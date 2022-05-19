@@ -29,6 +29,11 @@ variable "ami" {
   default = ""
 }
 
+variable "associate_public_ip_address" {
+  type    = string
+  default = false
+}
+
 variable "iam_instance_profile" {
   type    = string
   default = ""

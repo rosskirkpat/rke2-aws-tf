@@ -156,3 +156,20 @@ variable "enable_ccm" {
   type        = bool
   default     = false
 }
+
+variable "cert_manager_version" {
+  type        = string
+  description = "Version of cert-manager to install alongside Rancher (format: 0.0.0)"
+  default     = "1.5.1"
+}
+
+variable "rancher_version" {
+  type        = string
+  description = "Rancher server version (format v0.0.0)"
+  default     = "v2.6.3"
+}
+
+variable "rancher_cluster_name" {
+  description = "cluster name to use in tagging resources for aws cloud provider"
+  type = string
+}
